@@ -31,7 +31,7 @@ __global__ void vector_add(const float* A, const float* B, float* C, int N) {
 
 This is a classic point of confusion that separates someone who just "uses" CUDA from someone who understands the **Hardware Limit constraints** we discussed earlier (like those on your RTX 3060).
 
-The choice between using only the X-axis versus using both X and Y is almost entirely about **escaping the hardware limits of the grid dimensions.**
+The choice between using only the X-axis versus using both X and Y is almost entirely about source data and **the hardware limits of the grid dimensions.**
 
 ---
 
@@ -44,7 +44,6 @@ This is used for **1D data** (arrays, lists, audio samples) when the total numbe
 * `gridDim.x`: $\lceil N / blockDim.x \rceil$
 * `gridDim.y`: **1**
 
-
 * **When to use it:** When your total number of elements  is relatively small (under ~2 billion).
 * **Hardware Limit:** On your RTX 3060, the max value for `gridDim.x` is **$2,147,483,647$ ($2^{31}-1$)**. Since this is a massive number (2 Billion), for simple 1D vector addition, you almost **never** need the Y-axis. The Y and Z dimensions of a grid are limited to only 65,535
 
@@ -54,11 +53,12 @@ This is used for **1D data** (arrays, lists, audio samples) when the total numbe
 
 You use this for **2D data** (Images, Matrices) or when you want to treat a very long 1D array as a 2D grid to stay within the much smaller hardware limits of the **Y and Z dimensions**.
 
-* **Launch Parameters:**
-* `blockDim`: `dim3(16, 16)` (Total 256 threads)
-* `gridDim`: `dim3(width/16, height/16)`
+| Launch Strategy | Use Case | Launch Parameters (`dim3`) |
+| --- | --- | --- |
+| **X-axis only** | **True 1D Data** (Vectors, Audio, 1D Buffers). Most efficient and standard for ML. | `grid(N/256, 1, 1)`, `block(256, 1, 1)` |
+| **X + Y axis** | **True 2D Data** (Images, Matrices, Video Frames). Easier to reason about  coordinates. | `grid(W/16, H/16, 1)`, `block(16, 16, 1)` |
 
-Spot on. In CUDA, if you don't use `dim3` and instead just pass an integer (like `myKernel<<<blocks, threads>>>`), the GPU assumes you are working in **1D**.
+In CUDA, if you don't use `dim3` and instead just pass an integer (like `myKernel<<<blocks, threads>>>`), the GPU assumes you are working in **1D**.
 
 Specifically:
 
@@ -72,13 +72,26 @@ Essentially, the hardware treats a single integer as `dim3(N, 1, 1)`.
 * `nx` (total threads per row) is used to "linearize" the 2D coordinate back into a 1D index for the memory array.
 * `idx = iy * nx + ix` is exactly how you calculate a pixel's offset in a flattened image array.
 
-
 #### **The "Why" (Constraints):**
 
 While the X-dimension of a grid can be 2 billion, the **Y and Z dimensions** of a grid are limited to only **65,535**.
 
 * If you are processing a 1D vector, the X-only approach is superior because it's simpler.
 * If you are processing a **Matrix**, the X+Y approach is superior because it matches the data's mental model.
+
+**Corrected 2D-to-1D code for a Matrix:**
+
+```cpp
+// Corrected for a matrix of known 'Width'
+unsigned int ix = threadIdx.x + blockDim.x * blockIdx.x;
+unsigned int iy = threadIdx.y + blockDim.y * blockIdx.y;
+
+if (ix < Width && iy < Height) {
+    unsigned int idx = iy * Width + ix; // Use the DATA's width, not the GRID's width
+    C[idx] = A[idx] + B[idx];
+}
+
+```
 
 ---
 
@@ -88,6 +101,8 @@ In the world of LLMs and Transformers:
 
 1. **Vector Addition (X-only):** Used for **LayerNorm** or **Residual Connections**. These are usually 1D operations on the hidden dimension (e.g., 4096).
 2. **Matrix Multiplication (X+Y):** Used for **Linear Layers** (). Here,  and  are 2D, so we use `ix` and `iy` to map threads to the specific row and column of the weight matrix.
+3. **Never use 2D grids for 1D vectors.** It adds unnecessary integer multiplications (`iy * nx`) inside a kernel that might run millions of times.
+4. **Use 2D grids only for Matrix operations.** When you do, `nx` shouldn't be `gridDim.x * blockDim.x`. It should be the **actual Width of the Matrix** passed in as a parameter (often called `stride` or `width`).
 
 ---
 
@@ -103,11 +118,9 @@ unsigned int idx = iy * nx + ix;
 
 This code assumes the grid is **perfectly sized** to your data. However, if your 2D matrix data is too large to fit into grid dimension, your `nx` might be larger than your actual row width.
 
-**The Optimized Strategy:** In high-performance kernels (like those in **vLLM**), we rarely use `gridDim.y` for 1D vectors unless we are doing a **Grid-Stride Loop**. A Grid-Stride Loop allows one thread to process multiple data points, which is the "Gold Standard" for production CUDA code.
+Specifically, the calculation for `nx` and `idx` is flawed if you are trying to process a **1D array**, this piece of code is intended for true 2D data access.
 
-See [Grid Stride](./vector-add-grid-stride.md)
-
-From a pure "hardware thread count" perspective, every thread still correctly gets a unique ID. If you have $N=16$ threads and $N=16$ data elements, every element *will* be touched by exactly one thread.
+However, from a pure "hardware thread count" perspective, every thread still correctly gets a unique ID. If you have $N=16$ threads and $N=16$ data elements, every element *will* be touched by exactly one thread.
 
 The reason I say it would point to the **wrong data** is because in ML Engineering, we don't just care about "touching every element"; we care about **Semantic Alignment** (Rows and Columns).
 
@@ -175,10 +188,6 @@ To be safe and "Senior-level," never calculate your data index based on `gridDim
 | **Grid-Dependent (Your code)** | `idx = iy * (gridDim.x * blockDim.x) + ix` | If you change your block size, your `idx` for the same `(ix, iy)` changes. **Bad.** |
 | **Data-Dependent (Professional)** | `idx = iy * data_width + ix` | The `(ix, iy)` coordinate always points to the same pixel, no matter the GPU. **Good.** |
 
----
+**The Optimized Strategy:** In high-performance kernels (like those in **vLLM**), we rarely use `gridDim.y` for 1D vectors unless we are doing a **Grid-Stride Loop**. A Grid-Stride Loop allows one thread to process multiple data points, which is the "Gold Standard" for production CUDA code.
 
-### **Next Step for You**
-
-Now that we've cleared up the 2D indexing "trap," would you like to see how to implement the **Grid-Stride Loop** for a **Matrix**?
-
-This is the ultimate professional kernel: it doesn't care about your grid size, and it uses the proper `data_width` to ensure it never points to the "wrong" pixel. Shall we?
+See [Grid Stride](./vector-add-grid-stride.md)
