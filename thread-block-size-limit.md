@@ -110,6 +110,11 @@ To be a Senior ML Infra engineer, you must distinguish between the **Logical** (
 * Inside the SM, the block is divided into **Warps**.
 * The SM's **Warp Scheduler** decides which warp gets to use the math units (ALUs) on every clock cycle.
 
+**Crucially:**
+
+* A Warp never spans two Blocks. All 32 threads in a warp belong to the exact same block.
+* Every thread in a Block shares the same blockIdx.x
+
 ---
 
 ### **3. Latency Hiding: Why 28 SMs can handle 2 Billion Blocks**
@@ -133,3 +138,59 @@ If you launch 29 blocks on 28 SMs:
 3. Your total execution time is doubled because that last block runs alone while 27 SMs sit idle.
 
 **ML Infra Pro-Tip:** In high-performance libraries like **vLLM**, engineers try to choose grid sizes that are multiples of the number of SMs (or close to it) to avoid this "Wave" or "Tail" inefficiency.
+
+---
+> Does each partition in a SM got its own ALUs, or do they share same ALUs but only have independent registers? What hardware gets "encapsulated" in a partition, I mean, each partition gets its independent copy of which hardware?
+
+On the **Ampere architecture (RTX 3060)**, an SM is divided into **4 sub-partitions** (often called SMSPs). These partitions are not just logical dividers; they are physically distinct "execution engines."
+
+---
+
+### **1. What is Encapsulated in a Partition?**
+
+Each of the 4 partitions is a self-contained unit that can "own" and execute warps. Every partition has its own private copy of the following hardware:
+
+* **Warp Scheduler:** The "brain" that decides which of the resident warps to run next.
+* **Dispatch Unit:** The "messenger" that sends the instruction from the scheduler to the ALUs.
+* **Register File (16,384 entries of 32-bit):** These are the high-speed "desk spaces" for your variables. Since an SM has 64K registers total, each of the 4 partitions gets exactly **16K**.
+* **Dedicated ALUs (Math Cores):**
+* **16 FP32 Cores:** For standard floating-point math.
+* **16 FP32/INT32 Cores:** Flexible cores that can do either float or integer math.
+* **8 LD/ST (Load/Store) Units:** For moving data between registers and memory.
+* **2 SFU (Special Function Units):** For `sin`, `cos`, `log`, `exp`.
+
+---
+
+### **2. Shared vs. Private: The SM Hierarchy**
+
+To understand why they are grouped into an SM at all, you have to look at what they **share**. Think of the SM as a "Suite" and the Partitions as "Individual Desks."
+
+| Hardware | Level | Shared or Private? |
+| --- | --- | --- |
+| **ALUs (Cores)** | **Partition** | **Private.** Partition A's cores cannot help Partition B. |
+| **Registers** | **Partition** | **Private.** A warp is "locked" to a partition to stay near its registers. |
+| **L1 Instruction Cache** | **SM** | **Shared.** All 4 partitions pull their code from the same cache. |
+| **Shared Memory / L1 Data Cache** | **SM** | **Shared.** This is vital! This is why threads in a block can "talk" to each other even if they are in different partitions. |
+| **Tensor Cores** | **SM** | **Shared (usually).** In Ampere, there is 1 Tensor Core per partition (4 per SM), but they often act in a coordinated fashion for large matrix math. |
+
+---
+
+### **3. The "Register-Core" Binding**
+
+Here is the "Aha!" moment for ML Infra: **A warp cannot move between partitions.**
+
+When you launch your 1,024-thread block, the hardware splits it into 32 warps. The scheduler then distributes those warps:
+
+* Warp 0–7  Partition 0
+* Warp 8–15  Partition 1
+* ...and so on.
+
+**Why?** Because the registers are physically wired to the ALUs inside that partition. If Warp 0 wanted to use the ALUs in Partition 1, it would have to "ship" its data across the chip, which is too slow.
+
+---
+
+### **4. Senior Interview Question: "Compute Divergence"**
+
+**Interviewer:** *"If Partition 0 is busy doing heavy `exp()` math using its 2 SFUs, and Partition 1 is idle, can Partition 1 help out?"*
+
+**The Answer:** **No.** This is why performance can be "jittery." If your threads are doing different types of work (branching), you might have some partitions slammed while others are sitting idle. This is why we strive for **uniformity** in our kernels.

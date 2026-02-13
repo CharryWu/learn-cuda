@@ -2,6 +2,9 @@
 
 To visualize how these variables map to a 2D matrix, think of it as a nested coordinate system. The **Grid** contains **Blocks**, and each **Block** contains **Threads**.
 
+$blockId=blockIdx.x+blockIdx.y \times gridDim.x;$  
+$threadId=blockId \times (blockDim.x \times blockDim.y)+(threadIdx.y \times blockDim.x)+threadIdx.x;$
+
 Here is an ASCII representation of a **Grid** launching 4 blocks (a  layout), where each block contains a  set of threads.
 
 ### The 2D CUDA Thread Mapping
