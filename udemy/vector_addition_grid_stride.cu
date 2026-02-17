@@ -26,6 +26,6 @@ extern "C" void solve(const float* A, const float* B, float* C, int N) {
     int threadsPerBlock = 256;
     int blocksPerGrid = (N + threadsPerBlock - 1) / threadsPerBlock;
 
-    vector_add<<<blocksPerGrid, threadsPerBlock>>>(A, B, C, N);
+    vectorAddGridStride<<<blocksPerGrid, threadsPerBlock>>>(A, B, C, N);
     cudaDeviceSynchronize();
 }
