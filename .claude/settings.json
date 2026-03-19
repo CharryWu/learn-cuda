@@ -1,4 +1,10 @@
 {
   "defaultMode": "bypassPermissions",
-  "sandbox": true
+  "sandbox": {
+    "enabled": true,
+    "filesystem": {
+      "allowRead": ["~/ferris-compute-cuda"],
+      "allowWrite": ["~/ferris-compute-cuda"]
+    }
+  }
 }
