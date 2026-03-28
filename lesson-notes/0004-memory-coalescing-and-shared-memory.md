@@ -53,3 +53,5 @@ tile[threadIdx.y][swizzle_x] = global_in[...];
 int swizzle_y = threadIdx.y ^ threadIdx.x;
 global_out[...] = tile[threadIdx.x][swizzle_y];
 ```
+
+https://leimao.github.io/blog/CUDA-Shared-Memory-Swizzling/
